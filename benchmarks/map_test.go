@@ -10,6 +10,11 @@ import (
 	"github.com/puzpuzpuz/xsync/v2"
 )
 
+type LockedMap struct {
+	m map[uintptr]uintptr
+	l sync.RWMutex
+}
+
 const (
 	epochs  uintptr = 1 << 12
 	mapSize         = 8
@@ -45,6 +50,17 @@ func setupXsyncMap() *xsync.MapOf[uintptr, uintptr] {
 		m.Store(i, i)
 	}
 	return m
+}
+
+func setupGoMapRWMutex() *LockedMap {
+	m := make(map[uintptr]uintptr, epochs)
+	for i := uintptr(0); i < epochs; i++ {
+		m[i] = i
+	}
+	return &LockedMap{
+		m: m,
+		l: sync.RWMutex{},
+	}
 }
 
 func BenchmarkHaxMapReadsOnly(b *testing.B) {
@@ -198,6 +214,52 @@ func BenchmarkXsyncMapReadsWithWrites(b *testing.B) {
 			for pb.Next() {
 				for i := uintptr(0); i < epochs; i++ {
 					j, _ := m.Load(i)
+					if j != i {
+						b.Fail()
+					}
+				}
+			}
+		}
+	})
+}
+
+func BenchmarkGoMapRWMutexReadsOnly(b *testing.B) {
+	m := setupGoMapRWMutex()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			for i := uintptr(0); i < epochs; i++ {
+				m.l.RLock()
+				j := m.m[i]
+				m.l.RUnlock()
+				if j != i {
+					b.Fail()
+				}
+			}
+		}
+	})
+}
+
+func BenchmarkGoMapRWMutexReadsWithWrites(b *testing.B) {
+	m := setupGoMapRWMutex()
+	var writer uintptr
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		// use 1 thread as writer
+		if atomic.CompareAndSwapUintptr(&writer, 0, 1) {
+			for pb.Next() {
+				for i := uintptr(0); i < epochs; i++ {
+					m.l.Lock()
+					m.m[i] = i
+					m.l.Unlock()
+				}
+			}
+		} else {
+			for pb.Next() {
+				for i := uintptr(0); i < epochs; i++ {
+					m.l.RLock()
+					j := m.m[i]
+					m.l.RUnlock()
 					if j != i {
 						b.Fail()
 					}
